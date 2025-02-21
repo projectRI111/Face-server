@@ -1,7 +1,7 @@
 import express from "express";
 import asyncHandler from "express-async-handler";
-import Course from "../models/Course.js";
-import Department from "../models/Department.js";
+import Course from "../Models/Course.js";
+import Department from "../Models/Department.js";
 import User from "../Models/User.js";
 import { isTeacher, auth } from "../Middleware/AuthMiddleware.js";
 import Attendance from "../Models/Attendance.js";
