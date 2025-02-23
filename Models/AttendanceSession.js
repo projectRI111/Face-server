@@ -6,7 +6,7 @@ const AttendanceSessionSchema = new mongoose.Schema({
     ref: "Course",
     required: true,
   },
-  qrCode: { type: String, required: true },
+  qrCode: { type: String },
   lectureDate: { type: Date, required: true },
   startTime: { type: Date, required: true },
   endTime: { type: Date, required: true },

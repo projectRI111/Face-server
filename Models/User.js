@@ -11,32 +11,42 @@ const userSchema = new mongoose.Schema(
     department: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Department",
-      required: true,
+      required: function () {
+        return this.role === "student"; // Required only for students
+      },
     },
     uniqueId: { type: String, unique: true, required: true },
     courses: [
       {
-        course: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "Course",
-        },
-        enrolledAt: { type: Date, default: Date.now }, // Timestamp for enrollment
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Course",
       },
     ],
     faceData: {
-      type: [Number], // Array to store face descriptor data
-      required: true, // Ensure face data is captured during registration
+      image: {
+        type: String,
+        required: function () {
+          return this.role === "student";
+        },
+      }, // Base64 or URL
+      descriptors: {
+        type: [Number],
+        required: function () {
+          return this.role === "student";
+        },
+      }, // Face recognition data
     },
     profilePicture: {
-      type: String, // URL or file path for the profile picture
+      type: String,
+      default: "https://example.com/default-profile.png", // Placeholder URL
     },
   },
   { timestamps: true }
 );
 
 // Hash password before saving
-userSchema.methods.matchPassword = async function (enterPassword) {
-  return await bcrypt.compare(enterPassword, this.password);
+userSchema.methods.matchPassword = async function (enteredPassword) {
+  return await bcrypt.compare(enteredPassword, this.password);
 };
 
 userSchema.pre("save", async function (next) {

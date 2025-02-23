@@ -24,90 +24,98 @@ const generateUniqueId = (role) => {
 // Register User (Student or Teacher)
 userRouter.post(
   "/register",
-  asyncHandler(async (req, res) => {
-    const {
-      firstName,
-      lastName,
-      email,
-      password,
-      role,
-      departmentId,
-      faceData, // Add faceData to request body
-    } = req.body;
+  asyncHandler(async (req, res, next) => {
+    try {
+      const {
+        firstName,
+        lastName,
+        email,
+        password,
+        role,
+        departmentId,
+        faceData,
+      } = req.body;
 
-    // Validate required fields
-    if (!firstName || !lastName || !email || !password || !role) {
-      res.status(400);
-      throw new Error("Please fill all required fields.");
-    }
-
-    // Ensure faceData is provided for students
-    if (role === "student" && (!faceData || faceData.length === 0)) {
-      res.status(400);
-      throw new Error("Face data is required for student registration.");
-    }
-
-    // Check if the user already exists
-    const userExists = await User.findOne({ email });
-    if (userExists) {
-      res.status(400);
-      throw new Error("User already exists.");
-    }
-
-    // Generate a unique ID based on role
-    const uniqueId = generateUniqueId(role);
-
-    // Create a new user
-    const newUser = new User({
-      firstName,
-      lastName,
-      email,
-      password,
-      role,
-      uniqueId,
-      department: departmentId, // Directly link department
-      courses: [], // Initialize empty course array for students
-      faceData: role === "student" ? faceData : undefined, // Store faceData only for students
-    });
-
-    // If the user is a student, assign courses from the department
-    if (role === "student" && departmentId) {
-      const department = await Department.findById(departmentId).populate(
-        "courses"
-      );
-
-      if (!department) {
-        throw new Error("Invalid department.");
+      // Validate required fields
+      if (!firstName || !lastName || !email || !password || !role) {
+        return res
+          .status(400)
+          .json({ message: "Please fill all required fields." });
       }
 
-      // Enroll the student in all courses within the department
-      for (const course of department.courses) {
-        newUser.courses.push(course._id);
-        await Course.findByIdAndUpdate(course._id, {
-          $addToSet: { students: newUser._id },
-        });
+      // Ensure faceData is provided for students
+      if (
+        role === "student" &&
+        (!faceData || !faceData.image || !faceData.descriptors)
+      ) {
+        return res
+          .status(400)
+          .json({ message: "Face data is required for student registration." });
       }
+
+      // Check if the user already exists
+      const existingUser = await User.findOne({ email });
+      if (existingUser) {
+        return res.status(400).json({ message: "User already exists." });
+      }
+
+      // Generate a unique ID based on role
+      const uniqueId = generateUniqueId(role);
+
+      // Create a new user
+      const newUser = new User({
+        firstName,
+        lastName,
+        email,
+        password,
+        role,
+        uniqueId,
+        department: departmentId || null,
+        courses: [], // Empty course array for students initially
+        faceData: role === "student" ? faceData : undefined, // Store faceData only for students
+      });
+
+      // If the user is a student, assign courses from the department
+      if (role === "student" && departmentId) {
+        const department = await Department.findById(departmentId).populate(
+          "courses"
+        );
+
+        if (!department) {
+          return res.status(400).json({ message: "Invalid department." });
+        }
+
+        // Enroll the student in all department courses
+        newUser.courses = department.courses.map((course) => course._id);
+
+        await Promise.all(
+          department.courses.map((course) =>
+            Course.findByIdAndUpdate(course._id, {
+              $addToSet: { students: newUser._id },
+            })
+          )
+        );
+      }
+
+      // Save the user
+      const createdUser = await newUser.save();
+
+      // Send response
+      res.status(201).json({
+        _id: createdUser._id,
+        firstName: createdUser.firstName,
+        lastName: createdUser.lastName,
+        email: createdUser.email,
+        role: createdUser.role,
+        uniqueId: createdUser.uniqueId,
+        faceData: createdUser.faceData,
+        token: generateToken(createdUser._id),
+      });
+    } catch (error) {
+      next(error); // Pass errors to global error handler
     }
-
-    // Save the user
-    const createdUser = await newUser.save();
-
-    res.status(201).json({
-      _id: createdUser._id,
-      firstName: createdUser.firstName,
-      lastName: createdUser.lastName,
-      email: createdUser.email,
-      role: createdUser.role,
-      uniqueId: createdUser.uniqueId,
-      faceData: createdUser.faceData, // Return faceData for confirmation
-      token: generateToken(createdUser._id),
-    });
   })
 );
-
-
-
-
 
 // Login User
 userRouter.post(
@@ -160,7 +168,9 @@ userRouter.get(
   "/profile",
   auth, // Ensure the user is authenticated
   asyncHandler(async (req, res) => {
-    const user = await User.findById(req.user._id).populate("department courses").select("-password");
+    const user = await User.findById(req.user._id)
+      .populate("department courses")
+      .select("-password");
     if (user) {
       res.json(user);
     } else {
@@ -174,7 +184,8 @@ userRouter.put(
   "/profile",
   auth, // Ensure the user is authenticated
   asyncHandler(async (req, res) => {
-    const { firstName, lastName, email, password, department, role, uniqueId } = req.body;
+    const { firstName, lastName, email, password, department, role, uniqueId } =
+      req.body;
 
     const user = await User.findById(req.user._id);
 
@@ -207,8 +218,5 @@ userRouter.put(
     }
   })
 );
-
-
-
 
 export default userRouter;

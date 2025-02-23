@@ -17,21 +17,27 @@ const attendanceSchema = new mongoose.Schema(
       ref: "AttendanceSession",
       required: true,
     },
-    lectureDate: { type: Date, required: true },
     status: {
       type: String,
-      enum: ["pending", "present", "absent", "late"],
-      required: true,
-      default: "pending", // Default to pending status when a session is created
+      enum: ["present", "absent", "pending"],
+      default: "pending",
     },
-    markedAt: {
-      type: Date,
-      default: null, // Set to null until a student is marked as present or absent
-    },
+    lectureDate: { type: Date, required: true },
     teacher: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "User", // Assuming the teacher is a User model
-    //   required: true,
+      ref: "User",
+      required: true,
+    },
+    faceData: {
+      image: { type: String },
+      descriptors: { type: [Number] },
+    },
+    verificationMethod: {
+      type: String,
+      enum: ["face", "manual"],
+    },
+    verifiedAt: {
+      type: Date,
     },
   },
   { timestamps: true }

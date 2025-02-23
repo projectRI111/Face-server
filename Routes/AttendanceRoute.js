@@ -11,6 +11,15 @@ import cron from "node-cron";
 // import QRCode from "qrcode"; // Ensure QRCode is properly imported if not already
 
 import dayjs from "dayjs";
+import Course from "../Models/Course.js";
+import * as faceapi from "face-api.js";
+import canvas from "canvas";
+
+// Destructure required components
+const { Canvas, Image, ImageData } = canvas;
+
+// Patch face-api.js to use canvas in a Node.js environment
+faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
 const attendanceRouter = express.Router();
 
 attendanceRouter.get(
@@ -61,16 +70,17 @@ attendanceRouter.get(
   auth, // Ensure the user is authenticated
   asyncHandler(async (req, res) => {
     const studentId = req.user._id; // Get the student's ID from the authenticated user
-    console.log(studentId)
+    console.log(studentId);
 
     try {
       // Fetch all the courses the student is enrolled in
       const courses = await Course.find({ students: studentId });
-      console.log(courses)
+      console.log(courses);
       if (!courses || courses.length === 0) {
-      return res.status(404).json({ message: "No courses found for this student" });
-    }
-
+        return res
+          .status(404)
+          .json({ message: "No courses found for this student" });
+      }
 
       let totalClasses = 0; // Total number of classes the student is enrolled in
       let totalPresent = 0; // Number of classes the student attended
@@ -115,7 +125,6 @@ attendanceRouter.get(
   })
 );
 
-
 attendanceRouter.post(
   "/create/:courseId",
   auth,
@@ -131,6 +140,7 @@ attendanceRouter.post(
     const currentTime = dayjs();
     const currentDay = currentTime.format("dddd");
 
+    // Find the schedule for current day
     const schedule = course.schedule.find((item) => item.day === currentDay);
     if (!schedule) {
       return res.status(400).json({
@@ -147,9 +157,11 @@ attendanceRouter.post(
     }
 
     try {
+      // Parse schedule times
       const [startHours, startMinutes] = startTime.split(":").map(Number);
       const [endHours, endMinutes] = endTime.split(":").map(Number);
 
+      // Create datetime objects for lecture timing
       const lectureStartTime = currentTime
         .set("hour", startHours)
         .set("minute", startMinutes)
@@ -161,6 +173,7 @@ attendanceRouter.post(
         .set("second", 0)
         .set("millisecond", 0);
 
+      // Check if we're within the valid time window
       const fiveMinutesBeforeStart = lectureStartTime.subtract(5, "minute");
 
       if (currentTime.isBefore(fiveMinutesBeforeStart)) {
@@ -177,97 +190,97 @@ attendanceRouter.post(
         });
       }
 
-      const sessionIdentifier = `${courseId}_${currentDay}_${startTime}`;
+      // Generate a unique session identifier
+      const sessionIdentifier = `${courseId}_${currentDay}_${startTime}_${Date.now()}`;
 
-      QRCode.toDataURL(
+      // Create attendance session
+      const session = new AttendanceSession({
+        course: courseId,
+        lectureDate: currentTime.toDate(),
+        startTime: lectureStartTime.toDate(),
+        endTime: lectureEndTime.toDate(),
+        isActive: true,
         sessionIdentifier,
-        { errorCorrectionLevel: "H" },
-        async (err, qrCodeImage) => {
-          if (err) {
-            return res
-              .status(500)
-              .json({ message: "Failed to generate QR code", error: err });
-          }
+      });
 
-          const session = new AttendanceSession({
-            course: courseId,
-            qrCode: qrCodeImage,
-            lectureDate: currentTime.toDate(),
-            startTime: lectureStartTime.toDate(),
-            endTime: lectureEndTime.toDate(),
-            isActive: true,
-            sessionIdentifier, // Save the identifier
-          });
+      await session.save();
 
-          await session.save();
+      // Fetch student data along with their faceData
+      const students = await User.find({ _id: { $in: course.students } });
 
-          const attendanceDocs = course.students.map((studentId) => ({
-            course: courseId,
-            student: studentId,
-            session: session._id,
-            status: "pending",
-            lectureDate: currentTime.toDate(),
-            teacher: req.user._id,
-          }));
+      // Create attendance records for all students
+      const attendanceDocs = students.map((student) => ({
+        course: courseId,
+        student: student._id,
+        session: session._id,
+        status: "pending",
+        lectureDate: currentTime.toDate(),
+        teacher: req.user._id,
+        faceData: student.faceData || null, // Fetch face data from User model
+      }));
 
-          await Attendance.insertMany(attendanceDocs);
+      await Attendance.insertMany(attendanceDocs);
 
-          // Calculate the delay in milliseconds after lectureEndTime
-          const delay = lectureEndTime.diff(currentTime);
-
-          if (delay > 0) {
-            // Schedule the cron job to mark pending attendance as absent
-            cron.schedule(
-              `*/1 * * * *`, // Every minute (or adjust frequency as needed)
-              async () => {
-                if (dayjs().isAfter(lectureEndTime)) {
-                  await Attendance.updateMany(
-                    { session: session._id, status: "pending" },
-                    { $set: { status: "absent" } }
-                  );
-                  console.log("Marked pending records as absent.");
-                }
-              },
-              { scheduled: true, timezone: "UTC" }
+      // Schedule automatic marking of absent students
+      const markAbsentJob = cron.schedule(
+        "*/1 * * * *", // Every minute
+        async () => {
+          if (dayjs().isAfter(lectureEndTime)) {
+            await Attendance.updateMany(
+              { session: session._id, status: "pending" },
+              { $set: { status: "absent" } }
             );
-          }
-            cron.schedule(
-              `*/1 * * * *`, // Every minute (or adjust frequency as needed)
-              async () => {
-                console.log("ghgh")
-                if (dayjs().isAfter(lectureEndTime)) {
-                  await AttendanceSession.findByIdAndUpdate(
-                    session._id,
-                    { isActive: false },
-                    { new: true }
-                  );
-                  console.log(
-                    "Session marked as inactive after the lecture time."
-                  );
-                }
-              },
-              { scheduled: true, timezone: "UTC" }
+            console.log(
+              `Marked pending records as absent for session ${sessionIdentifier}`
             );
-
-          res.status(201).json({
-            message: "Attendance session created successfully",
-            session,
-            qrCode: qrCodeImage,
-          });
-        }
+            markAbsentJob.stop(); // Stop this cron job after execution
+          }
+        },
+        { scheduled: true, timezone: "UTC" }
       );
+
+      // Schedule session deactivation
+      const deactivateSessionJob = cron.schedule(
+        "*/1 * * * *", // Every minute
+        async () => {
+          if (dayjs().isAfter(lectureEndTime)) {
+            await AttendanceSession.findByIdAndUpdate(
+              session._id,
+              { isActive: false },
+              { new: true }
+            );
+            console.log(`Session ${sessionIdentifier} marked as inactive`);
+            deactivateSessionJob.stop(); // Stop this cron job after execution
+          }
+        },
+        { scheduled: true, timezone: "UTC" }
+      );
+
+      res.status(201).json({
+        message: "Attendance session created successfully",
+        session: {
+          _id: session._id,
+          courseId,
+          sessionIdentifier,
+          startTime: lectureStartTime.toDate(),
+          endTime: lectureEndTime.toDate(),
+          isActive: true,
+        },
+      });
     } catch (error) {
-      res.status(400).json({ message: error.message });
+      console.error("Error creating attendance session:", error);
+      res.status(500).json({
+        message: "Failed to create attendance session",
+        error: error.message,
+      });
     }
   })
 );
-
 
 // Cron job that runs every minute to check attendance sessions
 cron.schedule("*/1 * * * *", async () => {
   try {
     const currentTime = dayjs();
-    
 
     // Find sessions where the current time is after the session end time and the date has passed
     const expiredSessions = await AttendanceSession.find({
@@ -288,8 +301,6 @@ cron.schedule("*/1 * * * *", async () => {
     console.error("Error checking and updating expired sessions:", error);
   }
 });
-
-
 
 // Student fetching attendance records
 attendanceRouter.get(
@@ -337,7 +348,7 @@ attendanceRouter.get(
         attendanceList,
       });
     } catch (error) {
-      console.log(error)
+      console.log(error);
       res.status(500).json({ message: "Failed to fetch attendance details" });
     }
   })
@@ -345,12 +356,16 @@ attendanceRouter.get(
 
 // 2. Mark Attendance for a Session (Student)
 // Marking attendance
+// const faceapi = require("face-api.js");
+// const canvas = require("canvas");
+// const { Canvas, Image, ImageData } = canvas;
+// faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
 attendanceRouter.put(
   "/mark/:sessionIdentifier",
   auth,
   asyncHandler(async (req, res) => {
     const { sessionIdentifier } = req.params;
-    const studentId = req.user._id;
+    const { faceData } = req.body; // Face descriptors from frontend
 
     try {
       // Find the session using the session identifier
@@ -359,8 +374,8 @@ attendanceRouter.put(
         return res.status(404).json({ message: "Session not found" });
       }
 
+      // Check if session is active and within timeframe
       const currentTime = new Date();
-
       if (
         !session.isActive ||
         currentTime < session.startTime ||
@@ -372,24 +387,100 @@ attendanceRouter.put(
         });
       }
 
-      const attendance = await Attendance.findOne({
+      // Fetch all attendance records for this session
+      const attendanceRecords = await Attendance.find({
         session: session._id,
-        student: studentId,
+        status: "pending",
+      }).populate("student"); // Populate student to access faceData
+
+      if (!attendanceRecords || attendanceRecords.length === 0) {
+        return res.status(404).json({
+          message: "No pending attendance records found for this session",
+        });
+      }
+
+      let matchedStudent = null;
+      let matchedAttendanceRecord = null;
+      const FACE_MATCH_THRESHOLD = 0.6; // Adjust threshold as needed
+      const faceDataArray = new Float32Array(faceData); // Ensure faceData is a Float32Array
+
+      async function findMatchingStudent(records, faceDataArray, threshold) {
+        for (const record of records) {
+          if (
+            record.student &&
+            record.faceData &&
+            record.faceData.descriptors &&
+            record.faceData.descriptors.length > 0
+          ) {
+            const storedDescriptor = new Float32Array(
+              record.faceData.descriptors
+            );
+            console.log(storedDescriptor.length, faceDataArray.length);
+
+            const distance = faceapi.euclideanDistance(
+              storedDescriptor,
+              faceDataArray
+            );
+
+            if (distance <= threshold) {
+              return {
+                matchedStudent: record.student,
+                matchedAttendanceRecord: record,
+              };
+            }
+          }
+        }
+        return { matchedStudent: null, matchedAttendanceRecord: null };
+      }
+
+      const matchResult = await findMatchingStudent(
+        attendanceRecords,
+        faceDataArray,
+        FACE_MATCH_THRESHOLD
+      );
+      matchedStudent = matchResult.matchedStudent;
+      matchedAttendanceRecord = matchResult.matchedAttendanceRecord;
+
+      if (!matchedStudent) {
+        return res.status(401).json({
+          message: "Face verification failed. No matching student found.",
+        });
+      }
+
+      console.log(matchedAttendanceRecord._id);
+
+      // Check if attendance is already marked for this student and session
+      const existingAttendance = await Attendance.findOne({
+        student: matchedStudent._id,
+        session: session._id,
+        status: "present",
       });
-      if (!attendance) {
-        return res.status(404).json({ message: "Attendance record not found" });
+
+      if (existingAttendance) {
+        return res.status(409).json({
+          message:
+            "Attendance already marked for this student in this session.",
+        });
       }
 
-      if (attendance.status !== "pending") {
-        return res.status(400).json({ message: "Attendance already marked" });
-      }
+      // Update the attendance record directly in the database
+      await Attendance.findByIdAndUpdate(matchedAttendanceRecord._id, {
+        status: "present",
+        verificationMethod: "face",
+        verifiedAt: new Date(),
+      });
 
-      attendance.status = "present";
-      await attendance.save();
-
-      res.status(200).json({ message: "Attendance marked successfully" });
+      res.status(200).json({
+        message: "Attendance marked successfully",
+        verifiedAt: new Date(),
+        student: matchedStudent._id,
+      });
     } catch (error) {
-      res.status(500).json({ message: "Failed to mark attendance" });
+      console.error("Attendance marking error:", error);
+      res.status(500).json({
+        message: "Failed to mark attendance",
+        error: error.message,
+      });
     }
   })
 );
